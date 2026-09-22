@@ -10,7 +10,7 @@ VALID_USERNAME_PASSWORD_PAIRS = {
     os.getenv("ADMIN_USER", "admin"): os.getenv("ADMIN_PW", "admin")
 }
 
-df = pd.read_excel("./data.xlsx")
+df = pd.read_excel("./data_v2.xlsx")
 
 categorical_cols = [
     "Assigned Cluster",
@@ -61,7 +61,7 @@ top_controls = dbc.Card(
                                     {"label": col, "value": col}
                                     for col in categorical_cols
                                 ],
-                                value="Reference",
+                                value="Assigned Cluster",
                                 clearable=False,
                             ),
                         ],
@@ -122,6 +122,17 @@ sidebar_filters = dbc.Card(
                 multi=True,
                 className="mb-3",
             ),
+            html.Label("Prediction Type", className="fw-bold small"),
+            dcc.Dropdown(
+                id="prediction-type-filter",
+                options=[
+                    {"label": str(s), "value": s}
+                    for s in sorted(df["Prediction Type"].dropna().unique())
+                ],
+                value=list(df["Prediction Type"].dropna().unique()),
+                multi=True,
+                className="mb-3",
+            ),
             html.Label(
                 "Show Points (Box Plot)", className="fw-bold small d-block mb-1"
             ),
@@ -175,7 +186,7 @@ footer = html.Footer(
                 dbc.Col(
                     html.A(
                         "View Source (GitHub)",
-                        href="https://github.com/atrautm1/seed-purity-dashboard.git",  # Replace with your repo link
+                        href="https://github.com/atrautm1/seed-purity-dashboard.git",
                         target="_blank",  # Opens link in a new browser tab
                         className="text-decoration-none text-secondary small fw-bold",
                     ),
@@ -196,7 +207,7 @@ main_content = dbc.Card(
             dbc.Tabs(
                 [
                     dbc.Tab(
-                        label="Box & Scatter Plots",
+                        label="Plots",
                         tab_id="tab-graphs",
                         children=[
                             dbc.Row(
@@ -205,7 +216,15 @@ main_content = dbc.Card(
                                     dbc.Col(dcc.Graph(id="scatter-plot-graph"), md=6),
                                 ],
                                 className="mt-3",
-                            )
+                            ),
+                            html.Br(),
+                            dbc.Row(
+                                [
+                                    dbc.Col(dcc.Graph(id="barnhart-graph"), md=6),
+                                    dbc.Col(dcc.Graph(id="purity-pie-graph"), md=6),
+                                ],
+                                className="mt-3",
+                            ),
                         ],
                     ),
                     dbc.Tab(
@@ -312,6 +331,8 @@ PALETTE_DICT = {
     [
         Output("box-plot-graph", "figure"),
         Output("scatter-plot-graph", "figure"),
+        Output("barnhart-graph", "figure"),  # Control Chart Scatter
+        Output("purity-pie-graph", "figure"),  # Distribution Pie
         Output("summary-table", "data"),
         Output("summary-table", "columns"),
     ],
@@ -324,6 +345,7 @@ PALETTE_DICT = {
         Input("study-filter", "value"),
         Input("points-toggle", "value"),
         Input("palette-selector", "value"),
+        Input("prediction-type-filter", "value"),
     ],
 )
 def update_dashboard(
@@ -335,6 +357,7 @@ def update_dashboard(
     selected_studies,
     points_mode,
     palette_name,
+    selected_predictions,
 ):
     selected_palette = PALETTE_DICT.get(palette_name, px.colors.qualitative.G10)
 
@@ -344,11 +367,37 @@ def update_dashboard(
         for i, cat in enumerate(unique_categories)
     }
 
+    def assign_purity_class(val):
+        if pd.isna(val):
+            return None
+        if val >= 95:
+            return "A"
+        if val >= 90:
+            return "B"
+        if val >= 80:
+            return "C"
+        return "D"
+
+    purity_colors_map = {
+        "A": "#2ca02c",  # standard plotly compliant green zones compliant zones compliant zones
+        "B": "#bcbd22",  # standard plotly compliant yellow zones compliant zones compliant zones
+        "C": "#ff7f0e",  # standard plotly compliant orange zones compliant zones compliant zones
+        "D": "#d62728",  # standard plotly compliant red zones compliant zones compliant zones
+    }
+
     filtered_df = df[
         (df["Sample Type"].isin(selected_samples or []))
         & (df["Study"].isin(selected_studies or []))
+        & (df["Prediction Type"].isin(selected_predictions or []))
     ].copy()
 
+    filtered_df["Purity Class"] = filtered_df["Purity Index"].apply(assign_purity_class)
+
+    filtered_df["Purity Class"] = pd.Categorical(
+        filtered_df["Purity Class"],
+        categories=["A", "B", "C", "D"],
+        ordered=True,
+    )
     filtered_df[x_col] = filtered_df[x_col].astype(str)
     filtered_df[color_col] = filtered_df[color_col].astype(str)
 
@@ -423,18 +472,128 @@ def update_dashboard(
         margin=dict(l=20, r=20, t=40, b=20),
     )
 
+    barnhart_df = filtered_df.reset_index(drop=True)
+
+    barnhart_fig = px.strip(
+        barnhart_df,
+        x=x_col,
+        y="Purity Index",
+        color="Purity Class",
+        color_discrete_map=purity_colors_map,
+        hover_data=[
+            c
+            for c in ["Sample Type", "Study", "Prediction Type"]
+            if c in barnhart_df.columns
+        ],
+        title="Purity Control Chart (Quality Bands)",
+    )
+
+    # Add shaded background zones for Barnhart control limits
+    zones = [
+        {
+            "y0": 95,
+            "y1": 100,
+            "color": "rgba(44, 160, 44, 0.12)",
+            "label": "Class A (95-100)",
+        },
+        {
+            "y0": 90,
+            "y1": 95,
+            "color": "rgba(188, 189, 34, 0.12)",
+            "label": "Class B (90-95)",
+        },
+        {
+            "y0": 80,
+            "y1": 90,
+            "color": "rgba(255, 127, 14, 0.12)",
+            "label": "Class C (80-90)",
+        },
+        {
+            "y0": 0,
+            "y1": 80,
+            "color": "rgba(214, 39, 40, 0.12)",
+            "label": "Class D (<80)",
+        },
+    ]
+
+    for zone in zones:
+        barnhart_fig.add_hrect(
+            y0=zone["y0"],
+            y1=zone["y1"],
+            fillcolor=zone["color"],
+            layer="below",
+            line_width=0,
+            annotation=None,
+            # annotation_text=zone["label"],
+            # annotation_position="top right",
+            # annotation_font_size=10,
+            # annotation_font_color="gray",
+        )
+
+        barnhart_fig.add_annotation(
+            x=1.02,  # 2% beyond the right edge of the plot
+            y=(zone["y0"] + zone["y1"]) / 2,  # Vertically centered in the zone
+            xref="x domain",  # Relative to plot domain (0=left, 1=right)
+            yref="y",  # Data coordinates on Y-axis
+            text=f"{zone['label']}",
+            showarrow=False,
+            xanchor="left",  # Align text starting from x position
+            yanchor="middle",
+            font=dict(size=10, color="#555555"),
+        )
+
+    barnhart_fig.update_layout(
+        template="plotly_white",
+        yaxis=dict(range=[0, 105], title="Purity Index (%)"),
+        xaxis_title=x_col,
+        showlegend=False,
+        margin=dict(
+            l=20, r=130, t=40, b=20
+        ),  # r=130 creates space on the right for labels
+    )
+
+    pie_counts = (
+        filtered_df["Purity Class"]
+        .value_counts()
+        .reindex(["A", "B", "C", "D"], fill_value=0)
+        .reset_index()
+    )
+    pie_counts.columns = ["Purity Class", "Count"]
+
+    purity_pie_fig = px.pie(
+        pie_counts,
+        names="Purity Class",
+        values="Count",
+        color="Purity Class",
+        color_discrete_map=purity_colors_map,
+        category_orders={"Purity Class": ["A", "B", "C", "D"]},
+        title="Purity Classes",
+        hole=0.3,  # Converts to donut style for improved readability
+    )
+    purity_pie_fig.update_traces(
+        textinfo="percent+label+value",
+        hovertemplate="Class %{label}: <b>%{value}</b> samples (%{percent})<extra></extra>",
+    )
+    purity_pie_fig.update_layout(
+        template="plotly_white",
+        margin=dict(l=20, r=20, t=40, b=20),
+    )
+
     # Summary Table Data
     if not filtered_df.empty:
         summary_df = (
-            filtered_df.groupby([x_col, color_col])["Purity Index"]
+            filtered_df.groupby([x_col, color_col])
             .agg(
-                Count="count",
-                Mean="mean",
-                Std_Dev="std",
-                Min="min",
-                Median="median",
-                Max="max",
-                Pct_Above_90=lambda x: (x > 90).mean() * 100,
+                Count=("Purity Index", "count"),
+                Mean=("Purity Index", "mean"),
+                Std_Dev=("Purity Index", "std"),
+                # Min=("Purity Index", "min"),
+                # Median=("Purity Index", "median"),
+                # Max=("Purity Index", "max"),
+                Pct_A=("Purity Class", lambda x: (x == "A").mean() * 100),
+                Pct_B=("Purity Class", lambda x: (x == "B").mean() * 100),
+                Pct_C=("Purity Class", lambda x: (x == "C").mean() * 100),
+                Pct_D=("Purity Class", lambda x: (x == "D").mean() * 100),
             )
             .reset_index()
             .round(2)
@@ -447,22 +606,29 @@ def update_dashboard(
                 "Count",
                 "Mean",
                 "Std_Dev",
-                "Min",
-                "Median",
-                "Max",
+                # "Min",
+                # "Median",
+                # "Max",
                 "Pct_Above_90",
             ]
         )
 
     table_data = summary_df.to_dict("records")
 
-    col_map = {"Pct_Above_90": "% Above 90% Purity", "Std_Dev": "Std Dev"}
+    col_map = {
+        "Std_Dev": "Std Dev",
+        "Pct_A": "% Class A",
+        "Pct_B": "% Class B",
+        "Pct_C": "% Class C",
+        "Pct_D": "% Class D",
+    }
+    # col_map = {"Pct_Above_90": "% Above 90% Purity", "Std_Dev": "Std Dev"}
     table_columns = [
         {"name": col_map.get(i, i.replace("_", " ").title()), "id": i}
         for i in summary_df.columns
     ]
 
-    return box_fig, scatter_fig, table_data, table_columns
+    return box_fig, scatter_fig, barnhart_fig, purity_pie_fig, table_data, table_columns
 
 
 if __name__ == "__main__":
