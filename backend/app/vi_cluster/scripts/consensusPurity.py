@@ -1,0 +1,218 @@
+from scipy.spatial.distance import hamming
+from hdbscan import HDBSCAN
+from scipy.stats import entropy
+import pandas as pd
+import logging
+import numpy as np
+from scipy.spatial.distance import cdist
+
+
+def calculate_purity_matrix(raw, consensus):
+
+    # cdist with 'hamming' returns the proportion of mismatching coordinates (0.0 to 1.0)
+    hamming_distances = cdist(raw, consensus, metric="hamming")
+
+    # Purity percentage is (1 - hamming_distance) * 100
+    purity_matrix = (1.0 - hamming_distances) * 100
+
+    return purity_matrix
+
+
+def calculate_purity_by_name(line_series, consensus_series):
+    """
+    Compares a line's genotypes against a consensus cluster and
+    returns the purity percentage.
+    """
+    # Filter out missing data/NaNs so we only compare overlapping valid markers
+    valid_mask = line_series.notna() & consensus_series.notna()
+    line_valid = line_series[valid_mask]
+    consensus_valid = consensus_series[valid_mask]
+
+    if len(line_valid) == 0:
+        return 0.0  # No overlapping markers
+
+    # 1.0 - hamming distance = proportion of identical markers
+    purity_proportion = 1.0 - hamming(line_valid, consensus_valid)
+    return purity_proportion * 100
+
+
+def optimize_hdbscan(embedding):
+    best_score = -1
+    best_size = 5
+
+    # Test min_cluster_sizes from 5 to 50
+    for size in range(5, 51, 5):
+        clusterer = HDBSCAN(min_cluster_size=size).fit(embedding)
+
+        # HDBSCAN provides a built-in validity metric for density
+        score = clusterer.relative_validity_
+
+        if score > best_score:
+            best_score = score
+            best_size = size
+
+    print(f"Optimal min_cluster_size found: {best_size} (Score: {best_score:.3f})")
+    return best_size
+
+
+def get_cluster_metrics(data, total_class_counts):
+    def calculate_cluster_metrics(cluster_df):
+        cluster_size = len(cluster_df)
+
+        # 1. Replace whitespace/empty strings with NaN, then drop all NaNs
+        valid_varieties = (
+            cluster_df["variety"].replace(r"^\s*$", np.nan, regex=True).dropna()
+        )
+
+        ignored_classes = ["Group 0", 0, "0", "Unknown", "Unlabeled"]
+        valid_varieties = valid_varieties[~valid_varieties.isin(ignored_classes)]
+
+        class_counts = valid_varieties.value_counts()
+
+        # 3. Handle clusters with no valid non-ignored varieties
+        if class_counts.empty:
+            majority_class = "Unlabeled"
+            majority_count = 0
+            purity = 0.0
+            ent = 0.0
+            recall = 0.0
+        else:
+            majority_class = class_counts.idxmax()
+            majority_count = class_counts.max()
+
+            purity = (majority_count / cluster_size) * 100
+            ent = entropy(class_counts, base=2)
+
+            total_majority_in_dataset = total_class_counts.get(majority_class, 0)
+            recall = (
+                (majority_count / total_majority_in_dataset) * 100
+                if total_majority_in_dataset > 0
+                else 0.0
+            )
+
+        return pd.Series(
+            {
+                "Size": cluster_size,
+                "Majority_Class": majority_class,
+                "Purity_%": purity,
+                "Entropy": ent,
+                "Recall_%": recall,
+            }
+        )
+
+    # 4. Group by the Cluster Label and apply the function
+    cluster_summary = (
+        data.groupby("cluster").apply(calculate_cluster_metrics).reset_index()
+    )
+
+    # Round the numbers for clean reading
+    cluster_summary = cluster_summary.round(
+        {"Purity_%": 2, "Entropy": 3, "Recall_%": 2}
+    )
+
+    return cluster_summary
+
+
+def plot_cluster_metrics(data, output_file):
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Scatter plot: Size -> marker size, Entropy -> color
+    scatter = ax.scatter(
+        data["Purity_%"],
+        data["Recall_%"],
+        s=data["Size"] * 15,  # Bubble size scaling
+        c=data["Entropy"],  # Color mapping
+        cmap="viridis_r",
+        alpha=0.7,
+        edgecolors="black",
+        linewidth=1,
+    )
+
+    # Label points with majority class name and cluster ID
+    for _, row in data.iterrows():
+        ax.annotate(
+            f"C{int(row['cluster'])}: {row['Majority_Class']}",
+            (row["Purity_%"], row["Recall_%"]),
+            xytext=(5, 5),
+            textcoords="offset points",
+            fontsize=8,
+        )
+
+    cbar = plt.colorbar(scatter)
+    cbar.set_label("Entropy (Lower is better)")
+
+    ax.set_xlabel("Group Assignment Purity % (assumed by 'reference')")
+    ax.set_ylabel("Recall (%)")
+    ax.set_title("Group Assignment Quality (Bubble Size = Cluster Size)")
+    ax.grid(True, linestyle="--", alpha=0.5)
+
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300)
+
+
+def create_cluster_metrics_payload(data):
+    # Note: Matplotlib 's' parameter represents area, whereas Plotly marker 'size'
+    # represents diameter in pixels. Adjust the multiplier (e.g., * 2) as needed
+    # for optimal bubble sizing on the web canvas.
+    sizes = (data["Size"] * 2).tolist()
+
+    # Create label strings matching your annotation format: "C{cluster}: {Majority_Class}"
+    text_labels = [
+        f"C{int(row['cluster'])}: {row['Majority_Class']}" for _, row in data.iterrows()
+    ]
+
+    trace = {
+        "x": data["Purity_%"].tolist(),
+        "y": data["Recall_%"].tolist(),
+        "mode": "markers+text",
+        "type": "scatter",
+        "text": text_labels,
+        "textposition": "top right",
+        "textfont": {"size": 10, "color": "#333333"},
+        "marker": {
+            "size": sizes,
+            "color": data["Entropy"].tolist(),
+            "colorscale": "Viridis",
+            "reversescale": True,  # Equivalent to matplotlib's 'viridis_r'
+            "showscale": True,
+            "colorbar": {"title": {"text": "Entropy"}},
+            "opacity": 0.7,
+            "line": {"color": "black", "width": 1},
+        },
+        "name": "Clusters",
+    }
+
+    layout = {
+        # "title": {
+        #     "text": "Group Assignment Quality (Bubble Size = Cluster Size)",
+        #     "font": {"size": 14},
+        #     "y": 0.95,  # Moves title slightly closer to the top edge
+        #     "x": 0.05,  # Left-aligns the title for a cleaner dashboard look
+        # },
+        "xaxis": {
+            "title": {"text": "Group Assignment Purity % (assumed by 'reference')"},
+            "showgrid": True,
+            "gridcolor": "rgba(0,0,0,0.1)",
+            "zeroline": False,
+            "automargin": True,  # Automatically adjusts spacing for tick labels
+        },
+        "yaxis": {
+            "title": {"text": "Recall (%)"},
+            "showgrid": True,
+            "gridcolor": "rgba(0,0,0,0.1)",
+            "zeroline": False,
+            "automargin": True,  # Automatically adjusts spacing for tick labels
+        },
+        # Tighter margins to remove excess outer whitespace
+        "margin": {"t": 40, "l": 50, "r": 30, "b": 40},
+        "hovermode": "closest",
+    }
+
+    return {
+        "id": "cluster_metrics",
+        "title": "Cluster Metrics",
+        "data": [trace],
+        "layout": layout,
+    }

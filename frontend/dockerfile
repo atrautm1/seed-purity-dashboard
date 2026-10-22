@@ -1,0 +1,12 @@
+FROM node:20-slim
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+
+# Expose Vite dev server port and bind to host 0.0.0.0
+EXPOSE 5173
+CMD ["npm", "run", "dev", "--", "--host"]

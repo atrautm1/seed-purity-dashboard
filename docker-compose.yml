@@ -1,13 +1,31 @@
-version: '3.8'
-
 services:
-  dash-app:
-    build: .
-    container_name: dash_app
-    restart: on-failure
-    expose:
-      - "8050"
+  backend:
+    build: ./backend
+    container_name: fastapi_backend
     ports:
-      - "8050:8050"
+      - "8000:8000"
+    volumes:
+      - ./backend:/code
     env_file:
       - .env
+    networks:
+      - app-network
+
+  frontend:
+    build: ./frontend
+    container_name: vue_frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    networks:
+      - app-network
+    depends_on:
+      - backend
+
+networks:
+  app-network:
+    driver: bridge
