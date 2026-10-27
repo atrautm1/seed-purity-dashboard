@@ -19,6 +19,7 @@ from pathlib import Path
 import logging
 import time
 import joblib
+import traceback
 from hdbscan import HDBSCAN
 from sklearn.pipeline import Pipeline
 from app.vi_cluster.scripts.consensusPurity import (
@@ -568,10 +569,10 @@ def labelSamples(
         output.loc[subsetIndex, "variety"] = varietiesList
 
     # save outputs
-    logging.info(f"DEBUG snpProportion.shape: {snpProportion.shape}")
-    logging.info(f"DEBUG output.shape: {output.shape}")
-    logging.info(f"DEBUG sampleMeta.shape: {sampleMeta.shape}")
-    logging.info(f"DEBUG output.variety unique: {output['variety'].unique()[:10]}")
+    # logging.info(f"DEBUG snpProportion.shape: {snpProportion.shape}")
+    # logging.info(f"DEBUG output.shape: {output.shape}")
+    # logging.info(f"DEBUG sampleMeta.shape: {sampleMeta.shape}")
+    # logging.info(f"DEBUG output.variety unique: {output['variety'].unique()[:10]}")
 
     # fig_title = f"UMAP clustering predictions (cut height {cutHeight})"
     # plot.umapRefLandrace(
@@ -610,13 +611,13 @@ def labelSamples(
     # )
 
     # append sampleMeta
-    metaOrder = []
-    for i in output["short_name"]:
-        metaOrder.append(np.where(sampleMeta["short_name"] == int(i))[0][0])
+    # metaOrder = []
+    # for i in output["short_name"]:
+    #     metaOrder.append(np.where(sampleMeta["short_name"] == int(i))[0][0])
 
-    sampleMetaCrop = sampleMeta.iloc[metaOrder]
-    sampleMetaCrop.index = output.index
-    output2 = pd.concat([output, sampleMetaCrop], axis=1)
+    # sampleMetaCrop = sampleMeta.iloc[metaOrder]
+    # sampleMetaCrop.index = output.index
+    # output2 = pd.concat([output, sampleMetaCrop], axis=1)
 
     # add parameters
     # with open(parameterFile) as f:
@@ -629,7 +630,7 @@ def labelSamples(
     #     index=False,
     # )
 
-    return output, output2
+    return output
 
 
 def loadParameters(parameterFile):
@@ -1233,6 +1234,85 @@ def runPipeline(
     # )
 
 
+def calculate_purity(
+    metadata_file,
+    consensus_file,
+    sample_file,
+):
+    logging.info(f"Loading metadata...")
+    sampleMeta = pd.read_csv(metadata_file)  # Read the metadata file
+
+    # sample_file = "./wheat_full/merged_genotypes_master.csv"
+    # read the samples
+    logging.info(f"Loading sample data...")
+    genotypeMatrix = pd.read_csv(sample_file, index_col="MarkerName")
+    genotypeMatrix.replace("-", np.nan, inplace=True)
+    genotype_matrix_t = genotypeMatrix.T
+
+    logging.info("Loading consensus data...")
+    # Read the consensus
+    consensusMatrix = pd.read_csv(consensus_file)
+
+    consensus_df = consensusMatrix.set_index("cluster")
+    consensus_df.drop(columns="Majority_Class", inplace=True)
+
+    logging.info(f"Preprocessing data...")
+    # filter down the full genotype matrix to only the specified ones...
+    excluded_cols = {"cluster", "Majority_Class"}
+    marker_cols = [col for col in consensusMatrix.columns if col not in excluded_cols]
+    logging.info(f"\t- Formatting...")
+
+    geno_cols = genotype_matrix_t.columns.to_list()
+    columns_to_keep = [
+        col for col in marker_cols if col != "short_name" and col in geno_cols
+    ]
+
+    genotype_matrix_filtered = genotype_matrix_t[columns_to_keep]
+    logging.info(f"\t- Reducing Duplicates...")
+    meta_subset = sampleMeta[["short_name", "reference"]].drop_duplicates(
+        subset=["short_name"]
+    )
+    # so that the merge functions properly...
+    meta_subset["short_name"] = meta_subset["short_name"].astype(str).str.strip()
+
+    logging.info("\t- clustering...")
+    CLUSTER_COL = "Majority_Class"
+    cluster_dict = dict(
+        zip(consensusMatrix["cluster"].astype(int), consensusMatrix[CLUSTER_COL])
+    )
+
+    logging.info("Calculating purity scores...")
+    try:
+        purity_matrix = calculate_purity_matrix(genotype_matrix_filtered, consensus_df)
+    except Exception as e:
+        logging.error("I ran into an error calculating the purity..")
+        logging.error(f"{traceback.format_exc()}")
+        return
+
+    # Find the index of the highest purity match for each raw genotype row
+    best_match_indices = np.argmax(purity_matrix, axis=1)
+    best_purities = np.max(purity_matrix, axis=1)
+    best_consensus_ids = consensus_df.index[best_match_indices]
+
+    # Build results DataFrame
+    df_purity_scores = pd.DataFrame(
+        {
+            "short_name": genotype_matrix_filtered.index,
+            "assigned_cluster": [
+                cluster_dict.get(int(cid)) for cid in best_consensus_ids
+            ],
+            "best_consensus_id": pd.Series(
+                consensus_df.index[best_match_indices], dtype="Int64"
+            ),
+            "purity_pct": best_purities,
+        }
+    )
+
+    logging.info(f"Analysis Completed...")
+
+    return df_purity_scores
+
+
 def generate_consensus_sequences(
     metadata_file,
     counts_file,
@@ -1274,7 +1354,7 @@ def generate_consensus_sequences(
         # outputDir=outputDir,
     )
 
-    output, _ = labelSamples(
+    output = labelSamples(
         snpProportionPCA,
         sampleMeta,
         db_communities,

@@ -11,8 +11,9 @@ export default defineConfig({
   },
   server: {
     // Crucial for Docker: ensures Vite listens on all network interfaces
-    host: true, 
+    host: '0.0.0.0', 
     port: 5173,
+    allowedHosts: true, // <-- Allows any incoming host header (essential behind reverse proxies like Caddy)
     proxy: {
       // Intercepts any request starting with /api and routes it to FastAPI
       '/api': {
