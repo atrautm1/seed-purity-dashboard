@@ -6,11 +6,31 @@ import logging
 import numpy as np
 from scipy.spatial.distance import cdist
 
+# def calculate_purity_matrix(raw, consensus):
+
+#     # cdist with 'hamming' returns the proportion of mismatching coordinates (0.0 to 1.0)
+#     hamming_distances = cdist(raw, consensus, metric="hamming")
+
 
 def calculate_purity_matrix(raw, consensus):
+    # 1. If they are pandas DataFrames, drop non-numeric columns/indices if any exist,
+    # then convert to numpy arrays and cast to float/int.
+    if hasattr(raw, "to_numpy"):
+        raw_matrix = raw.to_numpy()
+    else:
+        raw_matrix = np.array(raw)
 
-    # cdist with 'hamming' returns the proportion of mismatching coordinates (0.0 to 1.0)
-    hamming_distances = cdist(raw, consensus, metric="hamming")
+    if hasattr(consensus, "to_numpy"):
+        consensus_matrix = consensus.to_numpy()
+    else:
+        consensus_matrix = np.array(consensus)
+
+    # 2. Force conversion to numeric (handles strings representing numbers or NaNs)
+    raw_matrix = raw_matrix.astype(float)
+    consensus_matrix = consensus_matrix.astype(float)
+
+    # 3. Compute Hamming distances safely
+    hamming_distances = cdist(raw_matrix, consensus_matrix, metric="hamming")
 
     # Purity percentage is (1 - hamming_distance) * 100
     purity_matrix = (1.0 - hamming_distances) * 100

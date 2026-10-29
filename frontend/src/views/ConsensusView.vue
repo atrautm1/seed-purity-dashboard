@@ -338,14 +338,6 @@
         </div>
 
         <!-- Download button (Only shows if successful and download URL exists) -->
-        <!-- <a 
-      v-if="output.download_url && output.status === 'success'" 
-      v-bind:href="output.download_url" 
-      download 
-      class="text-xs bg-amber-600 hover:bg-amber-700 text-white font-medium px-3 py-1.5 rounded-lg transition-colors"
-    >
-      Download CSV
-    </a> -->
         <a
           v-if="output.download_url && output.status === 'success'"
           v-bind:href="downloaded ? null : output.download_url"

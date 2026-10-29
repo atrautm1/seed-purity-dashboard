@@ -20,6 +20,7 @@ from fastapi import Depends, FastAPI, HTTPException, status, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 import jwt  # PyJWT import
 from pydantic import BaseModel
+import numpy as np
 
 app = FastAPI()
 logger = logging.getLogger("consensus")
@@ -27,6 +28,11 @@ logger = logging.getLogger("consensus")
 # Directory to store generated output files temporarily
 OUTPUT_DIR = "generated_outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+SAMPLE_DIR = "sample_inputs"
+os.makedirs(SAMPLE_DIR, exist_ok=True)
+
+STALE_FILE_TIME = 24 * 60 * 60
 
 
 def create_pipeline_zip(cluster_df, consensus_df, df_purity_scores) -> str:
@@ -194,10 +200,6 @@ async def run_consensus_analysis(
                     )
                 )
 
-                target_logger.info(
-                    "Clustering and consensus analysis completed. Formatting output files..."
-                )
-
                 # 3. Save the output file for download
                 output_filename = "consensus_analysis_result.csv"
                 output_path = os.path.join(OUTPUT_DIR, output_filename)
@@ -214,7 +216,7 @@ async def run_consensus_analysis(
                     result_df, consensus_df, df_purity_scores
                 )
 
-                result_df.to_csv(output_path, index=False)
+                # result_df.to_csv(output_path, index=False)
 
                 target_logger.info("Pipeline execution successfully finished.")
 
@@ -266,17 +268,6 @@ async def run_consensus_analysis(
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 
-# Endpoint to handle downloading the generated output file
-# @app.get("/api/download/{filename}")
-# async def download_file(filename: str):
-#     file_path = os.path.join(OUTPUT_DIR, filename)
-#     if os.path.exists(file_path):
-#         return FileResponse(
-#             file_path, media_type="application/octet-stream", filename=filename
-#         )
-#     raise HTTPException(status_code=404, detail="File not found")
-
-
 @app.get("/api/download/{filename}")
 async def download_zip(filename: str, background_tasks: BackgroundTasks):
     file_path = os.path.join(OUTPUT_DIR, filename)
@@ -290,23 +281,209 @@ async def download_zip(filename: str, background_tasks: BackgroundTasks):
     return FileResponse(path=file_path, media_type="application/zip", filename=filename)
 
 
+async def run_periodic_cleanup():
+    """Continuously runs the file cleanup every 24 hours."""
+    while True:
+        try:
+            if os.path.exists(OUTPUT_DIR):
+                now = time.time()
+                for filename in os.listdir(OUTPUT_DIR):
+                    if filename.endswith(".zip") or filename.endswith(".csv"):
+                        file_path = os.path.join(OUTPUT_DIR, filename)
+
+                        # Check if file age is greater than 2 hours
+                        if os.path.isfile(file_path) and (
+                            now - os.path.getmtime(file_path) > STALE_FILE_TIME
+                        ):
+                            try:
+                                os.path.remove(file_path)
+                            except Exception as e:
+                                # Handle file locks or permission errors gracefully
+                                print(f"Could not remove {filename}: {e}")
+        except Exception as e:
+            print(f"Error in cleanup task: {e}")
+
+        # Wait for 24 hours before running the cleanup again
+        await asyncio.sleep(STALE_FILE_TIME)
+
+
 @app.on_event("startup")
-async def cleanup_old_output_files():
-    """Purges any leftover zip files older than 2 hours upon server startup."""
-    if not os.path.exists(OUTPUT_DIR):
-        return
+async def startup_event():
+    """Starts the background cleanup loop when FastAPI starts up."""
+    asyncio.create_task(run_periodic_cleanup())
 
-    now = time.time()
-    two_hours_in_seconds = 2 * 60 * 60
 
-    for filename in os.listdir(OUTPUT_DIR):
-        if filename.endswith(".zip"):
-            file_path = os.path.join(OUTPUT_DIR, filename)
-            # Check file age
-            if os.path.isfile(file_path) and (
-                now - os.path.getmtime(file_path) > two_hours_in_seconds
-            ):
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
+# @app.on_event("startup")
+# async def cleanup_old_output_files():
+#     """Purges any leftover zip files older than 2 hours upon server startup."""
+#     if not os.path.exists(OUTPUT_DIR):
+#         return
+
+#     now = time.time()
+#     two_hours_in_seconds = 2 * 60 * 60
+
+#     for filename in os.listdir(OUTPUT_DIR):
+#         if filename.endswith(".zip") or filename.endswith(".csv"):
+#             file_path = os.path.join(OUTPUT_DIR, filename)
+#             # Check file age
+#             if os.path.isfile(file_path) and (
+#                 now - os.path.getmtime(file_path) > two_hours_in_seconds
+#             ):
+#                 try:
+#                     os.remove(file_path)
+#                 except Exception:
+#                     pass
+
+
+@app.post("/api/purity")
+async def run_purity_pipeline(
+    metadata_file: UploadFile = File(...),
+    consensus_file: UploadFile = File(...),
+    genotype_file: UploadFile = File(...),
+    selected_columns: Optional[str] = Form(None),
+):
+    current_user: str = Depends(get_current_user)
+    log_queue = asyncio.Queue()
+
+    async def event_generator():
+        # 1. Attach the custom log handler for this specific request
+        handler = QueueLogHandler(log_queue)
+        formatter = logging.Formatter("%(levelname)s: %(message)s")
+        handler.setFormatter(formatter)
+
+        # Attach to root or specific module logger so internal logging statements are captured
+        target_logger = logging.getLogger()
+        target_logger.addHandler(handler)
+        target_logger.setLevel(logging.INFO)
+
+        async def analysis_task():
+            try:
+                # 1. Log file receipt
+                target_logger.info("Recieved input files:")
+                target_logger.info(f"Metadata file: {metadata_file.filename}")
+                target_logger.info(f"Consensus file: {consensus_file.filename}")
+                target_logger.info(f"Sample file: {genotype_file.filename}")
+                target_logger.info(f"Selected Columns: {selected_columns}")
+                selected_columns_formatted = json.loads(selected_columns)
+                contents_metadata = await metadata_file.read()
+                contents_consensus = await consensus_file.read()
+                contents_genotype = await genotype_file.read()
+                df = await asyncio.to_thread(
+                    vi_base.calculate_purity,
+                    metadata_file=io.BytesIO(contents_metadata),
+                    consensus_file=io.BytesIO(contents_consensus),
+                    sample_file=io.BytesIO(contents_genotype),
+                    selected_columns=selected_columns_formatted,
+                )
+                # await asyncio.sleep(0.4)
+
+                # Load underlying dataset (replace with your custom pipeline execution logic)
+                # df = pd.read_excel(os.path.join(SAMPLE_DIR, "data_v2.xlsx"))
+                target_logger.info(
+                    f"Successfully loaded {len(df)} records. Computing Purity Indexes"
+                )
+
+                # await asyncio.sleep(0.6)
+
+                # Helper: Assign Purity Class
+                def assign_class(val):
+                    if pd.isna(val):
+                        return None
+                    if val >= 95:
+                        return "A"
+                    if val >= 90:
+                        return "B"
+                    if val >= 80:
+                        return "C"
+                    return "D"
+
+                df["Purity Class"] = df["Purity Index"].apply(assign_class)
+
+                job_id = uuid.uuid4().hex[:10]
+                output_filename = f"purities_{job_id}.csv"
+                output_path = os.path.join(OUTPUT_DIR, output_filename)
+                df.to_csv(output_path, index=False)
+
+                # Clean NaNs for JSON transmission
+                records = df.replace({np.nan: None}).to_dict(orient="records")
+                categorical_columns = []
+                filter_options = {}
+
+                for col in df.columns:
+                    # Exclude key metrics and scores from being treated as categorical filters
+                    if col in [
+                        "Purity Index",
+                        "Purity Class",
+                        "Sample ID",
+                        "Sample_ID",
+                    ]:
+                        continue
+
+                    # Check if column is string, categorical, or low-cardinality integer/object
+                    is_categorical = (
+                        df[col].dtype == "object"
+                        or pd.api.types.is_categorical_dtype(df[col])
+                        or df[col].nunique() < 50
+                    )
+
+                    # Ensure it's not a unique identifier (like every row having a distinct value) or a single constant
+                    if is_categorical and 1 < df[col].nunique() < len(df):
+                        unique_vals = sorted(
+                            [str(x) for x in df[col].dropna().unique()]
+                        )
+                        categorical_columns.append(col)
+                        filter_options[col] = unique_vals
+                target_logger.info(
+                    "Pipeline execution completed successfully. Rendering dashboard..."
+                )
+
+                await asyncio.sleep(0.3)
+
+                return {
+                    "status": "success",
+                    "graphs": records,
+                    "download_url": f"/api/download/{output_filename}",
+                    "parameters_used": {
+                        "metadata": metadata_file.filename,
+                        "consensus": consensus_file.filename,
+                        "genotype": genotype_file.filename,
+                    },
+                    "categorical_columns": categorical_columns,  # e.g. ["Study", "Sample Type", "Year", "Tissue"]
+                    "filter_options": filter_options,
+                }
+            except Exception as e:
+                target_logger.error(f"Analysis failed: {str(e)}")
+                raise e
+            finally:
+                # Clean up handler so logs don't persist across requests
+                target_logger.removeHandler(handler)
+                # 5. Kick off the analysis task concurrently
+
+        task = asyncio.create_task(analysis_task())
+
+        # 6. Stream logs from the queue as they happen
+        while not task.done() or not log_queue.empty():
+            try:
+                log_msg = await asyncio.wait_for(log_queue.get(), timeout=0.1)
+                yield json.dumps({"type": "log", "message": log_msg}) + "\n"
+            except asyncio.TimeoutError:
+                continue
+
+        # 7. Yield the final result packet once the task finishes successfully
+        try:
+            result = await task  # Now correctly evaluates to a Python dictionary
+            yield json.dumps(
+                {
+                    "type": "result",
+                    "status": result["status"],
+                    "graphs": result["graphs"],
+                    "parameters_used": result["parameters_used"],
+                    "categorical_columns": result["categorical_columns"],
+                    "filter_options": result["filter_options"],
+                    "download_url": result["download_url"],
+                }
+            ) + "\n"
+        except Exception:
+            yield json.dumps({"type": "result", "status": "failure"}) + "\n"
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")

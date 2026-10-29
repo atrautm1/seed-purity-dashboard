@@ -176,7 +176,7 @@ def filterData(
                 )
 
         # Keep only the columns in snpProportion that correspond to the filtered short_names
-        kept_short_names = set(sampleMeta["short_name"].astype(str))
+        kept_short_names = set(sampleMeta["sample_id"].astype(str))
         cols_to_keep = [
             col for col in snpProportion.columns if str(col) in kept_short_names
         ]
@@ -184,7 +184,7 @@ def filterData(
     # -------------------------------------------------------------
 
     refRemove = sampleMeta[sampleMeta["reference"] == "REMOVE"][
-        "short_name"
+        "sample_id"
     ].values.astype("str")
 
     # optionally remove references above a divergence cutoff
@@ -194,18 +194,18 @@ def filterData(
         ].astype(
             "int"
         )  # all samples above cutoff
-        references = sampleMeta[(sampleMeta["reference"].notna())]["short_name"].values
+        references = sampleMeta[(sampleMeta["reference"].notna())]["sample_id"].values
         refRemove = np.append(
             refRemove,
             sampleMeta[
-                sampleMeta["short_name"].isin(np.intersect1d(divergent, references))
-            ]["short_name"].values.astype("str"),
+                sampleMeta["sample_id"].isin(np.intersect1d(divergent, references))
+            ]["sample_id"].values.astype("str"),
         )
 
     # Added errors="ignore" to prevent KeyErrors if reference columns were already dropped
     snpProportion = snpProportion.drop(refRemove, axis=1, errors="ignore")
     sampleMeta = sampleMeta.drop(
-        sampleMeta[sampleMeta["short_name"].isin(refRemove.astype("int"))].index
+        sampleMeta[sampleMeta["sample_id"].isin(refRemove.astype("int"))].index
     )
 
     snpProportionNoInterpolation = snpProportion.copy()
@@ -266,7 +266,7 @@ def updatedFilterData(countsFile, metaFile, minloci, minSample, refFilter=None):
     # import sample metadata
     sampleMeta = pd.read_csv(metaFile)
     refRemove = sampleMeta[sampleMeta["reference"] == "REMOVE"][
-        "short_name"
+        "sample_id"
     ].values.astype("str")
 
     # optionally remove references above a divergence cutoff
@@ -279,17 +279,17 @@ def updatedFilterData(countsFile, metaFile, minloci, minSample, refFilter=None):
             "int"
         )  # all samples above cutoff
 
-        references = sampleMeta[(sampleMeta["reference"].notna())]["short_name"].values
+        references = sampleMeta[(sampleMeta["reference"].notna())]["sample_id"].values
         refRemove = np.append(
             refRemove,
             sampleMeta[
-                sampleMeta["short_name"].isin(np.intersect1d(divergent, references))
-            ]["short_name"].values.astype("str"),
+                sampleMeta["sample_id"].isin(np.intersect1d(divergent, references))
+            ]["sample_id"].values.astype("str"),
         )
 
     genotype = genotype.drop(refRemove, axis=1)
     sampleMeta = sampleMeta.drop(
-        sampleMeta[sampleMeta["short_name"].isin(refRemove.astype("int"))].index
+        sampleMeta[sampleMeta["sample_id"].isin(refRemove.astype("int"))].index
     )
 
     genotypeNoInterpolation = genotype.copy()
@@ -348,12 +348,12 @@ def generateGenotypeMatrix(countsFile, metaFile, minloci, minSample, refFilter=N
     # import sample metadata
     sampleMeta = pd.read_csv(metaFile)
     refRemove = sampleMeta[sampleMeta["reference"] == "REMOVE"][
-        "short_name"
+        "sample_id"
     ].values.astype("str")
 
     genotype = genotype.drop(refRemove, axis=1)
     sampleMeta = sampleMeta.drop(
-        sampleMeta[sampleMeta["short_name"].isin(refRemove.astype("int"))].index
+        sampleMeta[sampleMeta["sample_id"].isin(refRemove.astype("int"))].index
     )
 
     genotypeNoInterpolation = genotype.copy()
@@ -538,7 +538,7 @@ def labelSamples(
     # consolidate outputs
     output = pd.DataFrame(embedding, columns=["embedding_X", "embedding_Y"])
     output["cluster"] = db_communities
-    output["short_name"] = snpProportion.columns
+    output["sample_id"] = snpProportion.columns
     output["probabilities"] = probabilities
     # if admixedCutoff:
     #     output["divergence"] = plot.homozygousDivergence(snpProportion)
@@ -1234,11 +1234,7 @@ def runPipeline(
     # )
 
 
-def calculate_purity(
-    metadata_file,
-    consensus_file,
-    sample_file,
-):
+def calculate_purity(metadata_file, consensus_file, sample_file, selected_columns=None):
     logging.info(f"Loading metadata...")
     sampleMeta = pd.read_csv(metadata_file)  # Read the metadata file
 
@@ -1264,16 +1260,16 @@ def calculate_purity(
 
     geno_cols = genotype_matrix_t.columns.to_list()
     columns_to_keep = [
-        col for col in marker_cols if col != "short_name" and col in geno_cols
+        col for col in marker_cols if col != "sample_id" and col in geno_cols
     ]
 
     genotype_matrix_filtered = genotype_matrix_t[columns_to_keep]
     logging.info(f"\t- Reducing Duplicates...")
-    meta_subset = sampleMeta[["short_name", "reference"]].drop_duplicates(
-        subset=["short_name"]
+    meta_subset = sampleMeta[["sample_id", "reference"]].drop_duplicates(
+        subset=["sample_id"]
     )
     # so that the merge functions properly...
-    meta_subset["short_name"] = meta_subset["short_name"].astype(str).str.strip()
+    meta_subset["sample_id"] = meta_subset["sample_id"].astype(str).str.strip()
 
     logging.info("\t- clustering...")
     CLUSTER_COL = "Majority_Class"
@@ -1297,18 +1293,26 @@ def calculate_purity(
     # Build results DataFrame
     df_purity_scores = pd.DataFrame(
         {
-            "short_name": genotype_matrix_filtered.index,
-            "assigned_cluster": [
+            "sample_id": genotype_matrix_filtered.index,
+            "Assigned Cluster": [
                 cluster_dict.get(int(cid)) for cid in best_consensus_ids
             ],
             "best_consensus_id": pd.Series(
                 consensus_df.index[best_match_indices], dtype="Int64"
             ),
-            "purity_pct": best_purities,
+            "Purity Index": best_purities,
         }
     )
 
     logging.info(f"Analysis Completed...")
+    if selected_columns:
+        df_purity_scores["sample_id"] = df_purity_scores["sample_id"].astype(str)
+        sampleMeta["sample_id"] = sampleMeta["sample_id"].astype(str)
+        filtered_meta = sampleMeta[selected_columns]
+        df_purity_scores_output = pd.merge(
+            df_purity_scores, filtered_meta, "left", on="sample_id"
+        )
+        return df_purity_scores_output
 
     return df_purity_scores
 
@@ -1342,7 +1346,11 @@ def generate_consensus_sequences(
     )
     output_graphs.append(pca_graph)
 
+    logging.info("Running UMAP")
+
     embedding, umap_reducer = embedData(snpProportionPCA, 42)
+
+    logging.info("Running HDBSCAN")
 
     hdbs, db_communities = clusteringHDBSCAN(
         snpProportionPCA,
@@ -1368,9 +1376,11 @@ def generate_consensus_sequences(
         probabilities=hdbs.probabilities_,
     )
 
+    logging.info("Generating output files")
+
     # Get the cluster metrics.. These should output entropy, purity
     # of the cluster or group assignments specifically.
-    group_assignments = output[["cluster", "short_name", "variety"]]
+    group_assignments = output[["cluster", "sample_id", "variety"]]
 
     # Remove the outlier group
     group_assignments.drop(
@@ -1378,11 +1388,11 @@ def generate_consensus_sequences(
         inplace=True,
     )
 
-    sampleMeta["short_name"] = sampleMeta["short_name"].astype(str)
+    sampleMeta["sample_id"] = sampleMeta["sample_id"].astype(str)
     group_to_cluster = pd.merge(
-        group_assignments[["short_name", "cluster"]],
-        sampleMeta[["short_name", "reference"]],
-        on="short_name",
+        group_assignments[["sample_id", "cluster"]],
+        sampleMeta[["sample_id", "reference"]],
+        on="sample_id",
         how="inner",  # 'inner' keeps only matching rows in both DataFrames
     )
     group_to_cluster.rename(columns={"reference": "variety"}, inplace=True)
@@ -1390,14 +1400,6 @@ def generate_consensus_sequences(
     total_class_counts = group_to_cluster["variety"].value_counts()
     cluster_metrics = get_cluster_metrics(group_to_cluster, total_class_counts)
 
-    # cluster_metrics.to_csv(
-    #     Path(outputDir).joinpath(f"{filePrefix}_cluster_metrics.csv")
-    # )
-
-    # plot_cluster_metrics(
-    #     cluster_metrics,
-    #     Path(outputDir).joinpath(f"{filePrefix}_cluster_metrics.png"),
-    # )
     output_graphs.append(create_cluster_metrics_payload(cluster_metrics))
 
     genotypeMatrix = pd.read_csv(genotype_file, index_col="MarkerName")
@@ -1410,7 +1412,7 @@ def generate_consensus_sequences(
     df_geno_t = filtered_df.T
 
     # Map the cluster assignments to the index using the short_name
-    cluster_mapping = group_assignments.set_index("short_name")["cluster"]
+    cluster_mapping = group_assignments.set_index("sample_id")["cluster"]
     df_geno_t["cluster"] = df_geno_t.index.map(cluster_mapping)
 
     # Group by cluster and calculate the mode
@@ -1426,14 +1428,7 @@ def generate_consensus_sequences(
         0, "Majority_Class", consensus_matrix_t.index.map(majority_map)
     )
 
-    # consensus_matrix_t.to_csv(
-    #     Path(outputDir).joinpath(f"{filePrefix}_consensus.csv")
-    # )
-
-    # Transpose back: Rows are Markers, Columns are Clusters
-    # consensus_matrix = consensus_matrix_t.T
-
-    cluster_map = group_assignments.set_index("short_name")["cluster"].to_dict()
+    cluster_map = group_assignments.set_index("sample_id")["cluster"].to_dict()
     purity_results = []
 
     for line_id, raw_geno_values in df_geno_t.iterrows():
@@ -1453,7 +1448,7 @@ def generate_consensus_sequences(
         # Store the results
         purity_results.append(
             {
-                "short_name": line_id,
+                "sample_id": line_id,
                 "assigned_cluster": assigned_cluster,
                 "purity_pct": purity_pct,
             }
@@ -1461,10 +1456,74 @@ def generate_consensus_sequences(
 
     # 5. Convert back to a DataFrame
     df_purity_scores = pd.DataFrame(purity_results)
+    # genotypeMatrix = pd.read_csv(genotype_file, index_col="MarkerName", na_values=["-"])
+    # common_markers = genotypeMatrix.index.intersection(snpProportionPCA.index)
+    # filtered_df = genotypeMatrix.loc[common_markers]
+    # group_assignments = output[output["cluster"] != -1][
+    #     ["cluster", "sample_id", "variety"]
+    # ].copy()
 
-    # df_purity_scores.to_csv(
-    #     Path(outputDir).joinpath(f"{filePrefix}_consensus_purity_scores.csv")
+    # sampleMeta["sample_id"] = sampleMeta["sample_id"].astype(str)
+    # group_to_cluster = pd.merge(
+    #     group_assignments[["sample_id", "cluster"]],
+    #     sampleMeta[["sample_id", "reference"]],
+    #     on="sample_id",
+    #     how="inner",
     # )
+    # group_to_cluster.rename(columns={"reference": "variety"}, inplace=True)
+    # group_to_cluster["variety"] = group_to_cluster["variety"].fillna("Group 0")
+
+    # total_class_counts = group_to_cluster["variety"].value_counts()
+    # cluster_metrics = get_cluster_metrics(group_to_cluster, total_class_counts)
+    # output_graphs.append(create_cluster_metrics_payload(cluster_metrics))
+
+    # # 4. Transpose and map clusters
+    # df_geno_t = filtered_df.T
+    # cluster_mapping = group_assignments.set_index("sample_id")["cluster"]
+    # df_geno_t["cluster"] = df_geno_t.index.map(cluster_mapping)
+
+    # # 5. Build consensus matrix (explicitly drop the cluster column before aggregating)
+    # geno_markers_only = df_geno_t.drop(columns="cluster")
+    # consensus_matrix_t = geno_markers_only.groupby(df_geno_t["cluster"]).agg(
+    #     lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan
+    # )
+
+    # # Insert Majority Class mapping
+    # majority_map = cluster_metrics["Majority_Class"].to_dict()
+    # consensus_matrix_t.insert(
+    #     0, "Majority_Class", consensus_matrix_t.index.map(majority_map)
+    # )
+
+    # # 6. VECTORIZED PURITY CALCULATION (Replaces the slow .iterrows() loop)
+    # valid_mask = df_geno_t["cluster"].notna() & df_geno_t["cluster"].isin(
+    #     consensus_matrix_t.index
+    # )
+    # valid_df = df_geno_t[valid_mask]
+
+    # assigned_clusters = valid_df["cluster"]
+    # sample_matrix = valid_df.drop(columns="cluster").to_numpy()
+    # consensus_markers = consensus_matrix_t.drop(columns="Majority_Class")
+    # consensus_matrix_vals = consensus_markers.loc[assigned_clusters].to_numpy()
+
+    # # Perform vectorized element-wise comparison (ignoring NaNs)
+    # matches = sample_matrix == consensus_matrix_vals
+    # valid_comparisons = ~pd.isna(sample_matrix) & ~pd.isna(consensus_matrix_vals)
+
+    # match_counts = (matches & valid_comparisons).sum(axis=1)
+    # total_valid = valid_comparisons.sum(axis=1)
+    # purity_scores = np.where(
+    #     total_valid > 0, (match_counts / total_valid) * 100, np.nan
+    # )
+
+    # # Build result DataFrame directly
+    # df_purity_scores = pd.DataFrame(
+    #     {
+    #         "sample_id": valid_df.index,
+    #         "assigned_cluster": assigned_clusters.values,
+    #         "purity_pct": purity_scores,
+    #     }
+    # )
+
     return output_graphs, cluster_metrics, consensus_matrix_t, df_purity_scores
 
 
